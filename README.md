@@ -1,5 +1,5 @@
 # scv-UnusedPortChecker
-Identifies open ports on a system that are not associated with any running process, indicating potential misconfigurations or abandoned services. - Focused on Validates security configurations (e.g., application configurations, infrastructure-as-code templates) against defined security policies. Reads configuration files, parses them, and verifies adherence to specified security rules.  Supports YAML or JSON formats.  Alerts on deviations from the security baseline.
+The port check runs by default: it reads local netstat output with its process information and reports open listening ports whose owning process cannot be identified (no pid or program in the netstat output), with the count printed before the list. Closed ports are never reported as unused. A failed port check (netstat missing or failing) exits 1 with a port check failed line. Use --skip-ports to opt out of the port check. The configuration and schema arguments are optional: when a config is supplied, it is validated against the supplied schema. Config files may be YAML (.yaml or .yml) or JSON.
 
 ## Install
 `git clone https://github.com/ShadowGuardAI/scv-unusedportchecker`
@@ -9,11 +9,11 @@ Identifies open ports on a system that are not associated with any running proce
 
 ## Parameters
 - `-h`: Show help message and exit
-- `-c`: No description provided
-- `-s`: Path to the JSON schema file.
+- `-c`: Path to the configuration file (YAML or JSON). Optional.
+- `-s`: Path to the JSON schema file. Required when a configuration file is supplied.
 - `-l`: Path to the log file. If not specified, logs will be printed to the console.
-- `--check-ports`: Enable unused port check after configuration validation.
-- `--offensive`: No description provided
+- `--check-ports`: Run the port check (this is the default; kept for compatibility).
+- `--skip-ports`: Skip the port check.
 
 ## License
 Copyright (c) ShadowGuardAI

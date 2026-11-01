@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 
 # Constants
-CONFIG_FILE_FORMATS = ["yaml", "json"]
+CONFIG_FILE_FORMATS = ["yaml", "yml", "json"]
 
 
 def setup_argparse() -> argparse.ArgumentParser:
@@ -27,21 +27,23 @@ def setup_argparse() -> argparse.ArgumentParser:
         argparse.ArgumentParser: The configured argument parser.
     """
     parser = argparse.ArgumentParser(
-        description="scv-UnusedPortChecker: Validates security configurations against defined security policies."
+        description="scv-UnusedPortChecker: Reports open listening ports whose owning process cannot be identified, and optionally validates a configuration file."
     )
     parser.add_argument(
         "-c",
         "--config",
         dest="config_file",
-        required=True,
-        help="Path to the configuration file (YAML or JSON).",
+        required=False,
+        default=None,
+        help="Path to the configuration file (YAML or JSON). Optional; when supplied, it is validated against the schema.",
     )
     parser.add_argument(
         "-s",
         "--schema",
         dest="schema_file",
-        required=True,
-        help="Path to the JSON schema file.",
+        required=False,
+        default=None,
+        help="Path to the JSON schema file. Required when a configuration file is supplied.",
     )
     parser.add_argument(
         "-l",
@@ -52,12 +54,12 @@ def setup_argparse() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check-ports",
         action="store_true",
-        help="Enable unused port check after configuration validation.",
+        help="Run the port check (this is the default; kept for compatibility).",
     )
     parser.add_argument(
-        "--offensive",
+        "--skip-ports",
         action="store_true",
-        help="Enable offensive security tests (e.g., check for common vulnerabilities).",
+        help="Skip the port check. Only the configuration validation, when a config is supplied, runs.",
     )
 
     return parser
@@ -90,7 +92,7 @@ def load_config(config_file: str) -> Dict[str, Any]:
 
     try:
         with open(config_file, "r") as f:
-            if file_extension == "yaml":
+            if file_extension in ("yaml", "yml"):
                 config = yaml.safe_load(f)
             else:  # JSON
                 config = json.load(f)
@@ -147,86 +149,55 @@ def validate_config(config: Dict[str, Any], schema: Dict[str, Any]) -> None:
         raise Exception(f"An unexpected error occurred during validation: {e}")
 
 
-def find_unused_ports() -> List[int]:
-    """Identifies open ports on the system that are not associated with any running process.
+def find_unused_ports():
+    """Find open listening ports whose owning process cannot be identified.
+
+    Reads local netstat output with its process information (the
+    process flag the platform offers, -p on Linux), parses the pid
+    and program fields where present, and reports listening ports
+    with no pid or program in that output. Closed ports are never
+    reported.
 
     Returns:
-        List[int]: A list of unused port numbers.
+        List[int]: Sorted listening ports with no identified owner,
+        or None when the port check itself failed (netstat missing
+        or failing), which is distinct from a completed check that
+        found nothing.
     """
     try:
-        # Get a list of all used ports
-        used_ports = set()
-        netstat_output = subprocess.check_output(["netstat", "-an"], text=True).splitlines()
-
-        for line in netstat_output:
-            parts = line.split()
-            if len(parts) > 4 and (
-                "LISTEN" in parts or "ESTABLISHED" in parts or "CLOSE_WAIT" in parts
-            ):
-                address = parts[3]
-                if ":" in address:
-                    try:
-                        port = int(address.split(":")[-1])
-                        used_ports.add(port)
-                    except ValueError:
-                        pass  # Ignore non-integer port values
-
-        # Check ports from 1 to 65535 for availability
-        unused_ports = []
-        for port in range(1, 65536):
-            if port not in used_ports:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(0.1)  # Short timeout
-                        result = s.connect_ex(("127.0.0.1", port))
-                        if result != 0:  # Port is likely unused
-                            unused_ports.append(port)
-                except Exception:
-                    pass  # Ignore errors during connection attempt
-
-        return unused_ports
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error running netstat: {e}")
-        return []
+        netstat_output = subprocess.check_output(
+            ["netstat", "-anp"], text=True, stderr=subprocess.STDOUT
+        ).splitlines()
     except Exception as e:
-        logging.error(f"An unexpected error occurred while checking for unused ports: {e}")
-        return []
+        logging.error(f"Error running netstat: {e}")
+        return None
 
-
-def perform_offensive_tests(config: Dict[str, Any]) -> None:
-    """Performs basic offensive security tests.
-
-    Args:
-        config (Dict[str, Any]): The validated configuration data.
-
-    Raises:
-        NotImplementedError: If offensive testing is enabled but not implemented.
-    """
-    # Check for default credentials, insecure configurations, etc.
-    # This is a placeholder for actual offensive security checks.
-    # For example, check if 'admin' is a username, or if passwords are in plain text
-
-    logging.warning(
-        "Offensive security tests are enabled but currently contain placeholder implementation."
-    )
-
-    # Placeholder example: Check for 'admin' username (highly simplified example)
-    if "users" in config and isinstance(config["users"], list):
-        for user in config["users"]:
-            if isinstance(user, dict) and "username" in user:
-                if user["username"] == "admin":
-                    logging.warning(
-                        "Potential vulnerability: Default username 'admin' found in configuration."
-                    )
-
-    # Placeholder example: Check for plain text passwords
-    if "passwords" in config and isinstance(config["passwords"], list):
-        logging.warning(
-            "Potential vulnerability: Passwords found in plain text in the configuration."
-        )
-
-    # Implement more thorough offensive tests based on the specific configuration and application.
+    unidentified = []
+    for line in netstat_output:
+        parts = line.split()
+        if len(parts) < 6 or "LISTEN" not in parts:
+            continue
+        address = parts[3]
+        if ":" not in address:
+            continue
+        try:
+            port = int(address.split(":")[-1])
+        except ValueError:
+            continue
+        pid = None
+        program = None
+        if len(parts) > 6:
+            proc_field = parts[6]
+            if proc_field and proc_field != "-":
+                if "/" in proc_field:
+                    pid_text, program = proc_field.split("/", 1)
+                    pid = pid_text or None
+                    program = program or None
+                elif proc_field.isdigit():
+                    pid = proc_field
+        if not pid or not program:
+            unidentified.append(port)
+    return sorted(set(unidentified))
 
 
 def main() -> int:
@@ -243,23 +214,28 @@ def main() -> int:
         logging.getLogger().addHandler(file_handler)
 
     try:
-        # Load and validate the configuration
-        config = load_config(args.config_file)
-        schema = load_schema(args.schema_file)
-        validate_config(config, schema)
-        logging.info("Configuration validation successful.")
+        # Config validation runs only when a config is supplied.
+        if args.config_file or args.schema_file:
+            if not args.config_file or not args.schema_file:
+                logging.error("Both a configuration file and a schema file are required for validation.")
+                return 1
+            config = load_config(args.config_file)
+            schema = load_schema(args.schema_file)
+            validate_config(config, schema)
+            logging.info("Configuration validation successful.")
 
-        # Check for unused ports if requested
-        if args.check_ports:
+        # The port check runs by default; --skip-ports opts out.
+        if not args.skip_ports:
             unused_ports = find_unused_ports()
+            if unused_ports is None:
+                logging.error("Port check failed.")
+                print("Port check failed.")
+                return 1
+            print(f"Open listening ports with no identified owning process: {len(unused_ports)}")
             if unused_ports:
                 logging.warning(f"Unused ports found: {unused_ports}")
             else:
                 logging.info("No unused ports found.")
-
-        # Perform offensive security tests if requested
-        if args.offensive:
-            perform_offensive_tests(config)
 
         return 0  # Success
 
@@ -288,8 +264,9 @@ if __name__ == "__main__":
 
 
 # Example usage:
-# Create a sample config.yaml, schema.json
-# Run the script:
-# python main.py -c config.yaml -s schema.json --check-ports --offensive
-# or, to log to a file:
-# python main.py -c config.yaml -s schema.json --log scv.log --check-ports
+# Run the port check on its own:
+# python main.py
+# Or with configuration validation as well:
+# python main.py -c config.yaml -s schema.json
+# Or validation only:
+# python main.py -c config.yaml -s schema.json --skip-ports
