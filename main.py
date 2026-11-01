@@ -165,6 +165,7 @@ def find_unused_ports():
         found nothing.
     """
     try:
+        # I ask netstat for the Linux form of the process flag. On a platform where that flag means something else or does not exist, the command fails as a whole and I return None, so the port check reports itself broken rather than guessing from weaker output.
         netstat_output = subprocess.check_output(
             ["netstat", "-anp"], text=True, stderr=subprocess.STDOUT
         ).splitlines()
@@ -175,6 +176,7 @@ def find_unused_ports():
     unidentified = []
     for line in netstat_output:
         parts = line.split()
+        # Requiring the LISTEN token means UDP listeners are invisible to me by construction: UDP rows carry no state word, so an unattended UDP service never appears in my report no matter how long it has been bound.
         if len(parts) < 6 or "LISTEN" not in parts:
             continue
         address = parts[3]
@@ -187,6 +189,7 @@ def find_unused_ports():
         pid = None
         program = None
         if len(parts) > 6:
+            # Column seven is the process field only in the layout I expect. A build of netstat that adds or drops a column shifts every field, and my parser then reads a foreign queue value or an address fragment as the process text and judges the port unidentified.
             proc_field = parts[6]
             if proc_field and proc_field != "-":
                 if "/" in proc_field:
@@ -195,8 +198,10 @@ def find_unused_ports():
                     program = program or None
                 elif proc_field.isdigit():
                     pid = proc_field
+        # Running without enough privilege makes netstat print a dash for processes owned by other users. I cannot separate that dash from a genuinely ownerless listener, so an unprivileged run reports other people's services as unidentified, which is the loudest false alarm this tool produces.
         if not pid or not program:
             unidentified.append(port)
+    # The set fold merges the same port number across protocols and address families. A port that is identified over IPv4 and unidentified over IPv6 is reported once, with no hint of which family raised the flag.
     return sorted(set(unidentified))
 
 
